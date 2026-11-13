@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Görsel Küçültücü</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/1.0.11/pako.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.js"></script>
+<style>
+  body{font-family:system-ui,sans-serif;background:#f4f5f7;color:#222;margin:0;padding:24px}
+  .wrap{max-width:820px;margin:auto}
+  h1{margin:0 0 16px}
+  #drop{border:3px dashed #aab;border-radius:14px;padding:40px;text-align:center;background:#fff;cursor:pointer}
+  #drop.over{border-color:#e5322d;background:#fff4f4}
+  .bar{display:flex;gap:10px;align-items:center;margin:16px 0;flex-wrap:wrap}
+  button{background:#e5322d;color:#fff;border:0;border-radius:8px;padding:12px 22px;font-size:16px;cursor:pointer}
+  button:disabled{background:#bbb;cursor:default}
+  button.sec{background:#444}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden}
+  td,th{padding:8px 10px;border-bottom:1px solid #eee;text-align:left;font-size:14px}
+  .ok{color:#1a8a3a;font-weight:600}
+  #sum{font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Görsel Küçültücü</h1>
+  <div id="drop">Görselleri buraya sürükle bırak<br><small>veya tıkla ve seç (JPG, PNG, WEBP)</small>
+    <input id="file" type="file" multiple accept="image/jpeg,image/png,image/webp" hidden>
+  </div>
+  <div class="bar">
+    <label>Sıkıştırma:
+      <select id="lvl"><option value="85">Az</option><option value="75" selected>Önerilen</option><option value="60">Çok</option></select>
+    </label>
+    <button id="go" disabled>Küçült</button>
+    <button id="dl" class="sec" disabled>İndir</button>
+    <button id="clr" class="sec">Temizle</button>
+    <span id="sum"></span>
+  </div>
+  <table><thead><tr><th>Dosya</th><th>Çözünürlük</th><th>Önce</th><th>Sonra</th><th>Kazanç</th></tr></thead><tbody id="list"></tbody></table>
+</div>
+
+<script type="module">
+// MozJPEG + WebP: Google Squoosh kodekleri (jSquash, WASM). PNG: UPNG ile 256 renk palet (pngquant/TinyPNG mantığı).
+const J = 'https://unpkg.com/@jsquash/jpeg@1.4.0/encode.js';
+const W = 'https://unpkg.com/@jsquash/webp@1.4.0/encode.js';
+let files = [];
+const $ = id => document.getElementById(id);
+const kb = n => n > 1048576 ? (n/1048576).toFixed(2)+' MB' : (n/1024).toFixed(0)+' KB';
+
+function add(list){
+  for (const f of list) if (/image\/(jpeg|png|webp)/.test(f.type)) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${f.name.replace(/[<>&]/g,'')}</td><td>-</td><td>${kb(f.size)}</td><td>bekliyor</td><td></td>`;
+    $('list').append(tr);
+    files.push({f, tr, out:null});
+  }
+  $('go').disabled = !files.length;
+}
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => { add(e.target.files); e.target.value=''; };
+$('drop').ondragover = e => { e.preventDefault(); $('drop').classList.add('over'); };
+$('drop').ondragleave = () => $('drop').classList.remove('over');
+$('drop').ondrop = e => { e.preventDefault(); $('drop').classList.remove('over'); add(e.dataTransfer.files); };
+$('clr').onclick = () => { files=[]; $('list').innerHTML=''; $('sum').textContent=''; $('go').disabled=$('dl').disabled=true; };
+
+async function pixels(f){
+  const bmp = await createImageBitmap(f);
+  const c = new OffscreenCanvas(bmp.width, bmp.height);
+  const ctx = c.getContext('2d'); ctx.drawImage(bmp,0,0);
+  return ctx.getImageData(0,0,bmp.width,bmp.height);
+}
+
+async function compress(f, q){
+  const img = await pixels(f);
+  let buf;
+  if (f.type === 'image/jpeg') {
+    const { default: enc } = await import(J);
+    buf = await enc(img, { quality:q, progressive:true, trellis_multipass:true, optimize_coding:true });
+  } else if (f.type === 'image/webp') {
+    const { default: enc } = await import(W);
+    buf = await enc(img, { quality:q, method:6 });
+  } else {
+    const colors = q >= 85 ? 256 : q >= 75 ? 256 : 128;
+    buf = UPNG.encode([img.data.buffer], img.width, img.height, colors);
+  }
+  return { blob: new Blob([buf], {type:f.type}), dim: img.width+'×'+img.height };
+}
+
+$('go').onclick = async () => {
+  $('go').disabled = $('dl').disabled = true;
+  const q = +$('lvl').value; let before=0, after=0;
+  for (const it of files) {
+    const td = it.tr.children;
+    td[3].textContent = 'küçültülüyor…';
+    try {
+      const { blob, dim } = await compress(it.f, q);
+      it.out = blob.size < it.f.size ? blob : it.f; // büyüdüyse orijinali koru
+      td[1].textContent = dim;
+      td[3].textContent = kb(it.out.size);
+      td[4].innerHTML = `<span class="ok">-%${Math.round(100 - it.out.size/it.f.size*100)}</span>`;
+    } catch (e) { it.out = it.f; td[3].textContent = 'hata: '+e.message; console.error(e); }
+    before += it.f.size; after += it.out.size;
+  }
+  $('sum').textContent = `Toplam: ${kb(before)} → ${kb(after)} (-%${Math.round(100-after/before*100)})`;
+  $('go').disabled = $('dl').disabled = false;
+};
+
+$('dl').onclick = async () => {
+  const done = files.filter(x => x.out);
+  const d = new Date(), p = n => String(n).padStart(2,'0');
+  const name = `kucultulmus-${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  if (window.showDirectoryPicker) {
+    try {
+      const root = await showDirectoryPicker({ id:'kucult', mode:'readwrite', startIn:'downloads' });
+      const dir = await root.getDirectoryHandle(name, { create:true });
+      for (const x of done) {
+        const w = await (await dir.getFileHandle(x.f.name, { create:true })).createWritable();
+        await w.write(x.out); await w.close();
+      }
+      alert(`${done.length} dosya "${name}" klasörüne kaydedildi.`);
+      return;
+    } catch (e) { if (e.name === 'AbortError') return; console.error(e); }
+  }
+  // shortcut: Firefox'ta klasör API'si yok, dosyalar tek tek iner
+  for (const x of done) {
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(x.out), download: x.f.name });
+    a.click(); await new Promise(r => setTimeout(r, 300));
+  }
+};
+</script>
+</body>
+</html>
